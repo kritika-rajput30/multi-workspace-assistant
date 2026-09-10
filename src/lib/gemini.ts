@@ -4,8 +4,12 @@ import { GoogleGenAI } from '@google/genai';
 // the same @google/genai SDK).
 export const genai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 
-export const CHAT_MODEL = process.env.GEMINI_CHAT_MODEL ?? 'gemini-2.0-flash';
-export const EMBED_MODEL = process.env.GEMINI_EMBED_MODEL ?? 'text-embedding-004';
+export const CHAT_MODEL = process.env.GEMINI_CHAT_MODEL ?? 'gemini-3.6-flash';
+export const EMBED_MODEL = process.env.GEMINI_EMBED_MODEL ?? 'gemini-embedding-001';
+// gemini-embedding-001 defaults to 3072 dims but supports Matryoshka
+// truncation — we ask for 768 (see embeddings.ts) to match vector(768) in
+// schema.sql and stay under pgvector's hnsw index limit (2000).
+export const EMBED_DIM = Number(process.env.GEMINI_EMBED_DIM ?? 768);
 
 // Quick reference for the interview — @google/genai v2 shapes:
 //
