@@ -42,3 +42,5 @@ next-env.d.ts
 
 # keep the example env in the repo
 !.env.example
+
+dev.log
