@@ -84,6 +84,21 @@ create table if not exists tool_calls (
 );
 create index if not exists tool_calls_workspace_idx on tool_calls (workspace_id, created_at);
 
+-- ----------------------------------------------------------------------------
+-- tasks: written by the save_task tool. The "real side effect in the active
+-- workspace" the exercise asks for.
+-- ----------------------------------------------------------------------------
+create table if not exists tasks (
+  id            uuid primary key default gen_random_uuid(),
+  workspace_id  uuid not null references workspaces (id) on delete cascade,
+  title         text not null,
+  notes         text,
+  due_date      text,
+  done          boolean not null default false,
+  created_at    timestamptz not null default now()
+);
+create index if not exists tasks_workspace_idx on tasks (workspace_id, created_at);
+
 -- ============================================================================
 -- match_chunks: workspace-scoped similarity search.
 -- The p_workspace_id filter is part of the query itself. A caller can only ever
@@ -126,21 +141,33 @@ alter table documents  enable row level security;
 alter table chunks     enable row level security;
 alter table messages   enable row level security;
 alter table tool_calls enable row level security;
+alter table tasks      enable row level security;
 
+-- drop-then-create makes this file safe to paste and run more than once
+-- (Postgres has no "create policy if not exists").
+drop policy if exists "own workspaces" on workspaces;
 create policy "own workspaces" on workspaces
   for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
 
+drop policy if exists "own documents" on documents;
 create policy "own documents" on documents
   for all using (exists (select 1 from workspaces w where w.id = documents.workspace_id and w.owner_id = auth.uid()));
 
+drop policy if exists "own chunks" on chunks;
 create policy "own chunks" on chunks
   for all using (exists (select 1 from workspaces w where w.id = chunks.workspace_id and w.owner_id = auth.uid()));
 
+drop policy if exists "own messages" on messages;
 create policy "own messages" on messages
   for all using (exists (select 1 from workspaces w where w.id = messages.workspace_id and w.owner_id = auth.uid()));
 
+drop policy if exists "own tool_calls" on tool_calls;
 create policy "own tool_calls" on tool_calls
   for all using (exists (select 1 from workspaces w where w.id = tool_calls.workspace_id and w.owner_id = auth.uid()));
+
+drop policy if exists "own tasks" on tasks;
+create policy "own tasks" on tasks
+  for all using (exists (select 1 from workspaces w where w.id = tasks.workspace_id and w.owner_id = auth.uid()));
 
 -- NOTE: the API routes use the service-role key (bypasses RLS), so they MUST
 -- still pass workspace_id explicitly on every query. RLS is the safety net,
