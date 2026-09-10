@@ -1,21 +1,17 @@
 // ============================================================================
-// RETRIEVAL  —  build this during the interview.  THIS IS THE ISOLATION TEST.
+// RETRIEVAL  —  THE ISOLATION BOUNDARY
 // ============================================================================
-// The rule: the workspace filter must be part of the vector search itself, not
-// applied to the results afterwards. schema.sql already gives you the
-// match_chunks(p_workspace_id, p_query_embedding, p_match_count) RPC that does
-// exactly this. Call it. Do NOT: fetch all chunks then .filter() in JS.
+// The workspace filter is part of the vector search itself: match_chunks()
+// (see supabase/schema.sql) runs `WHERE workspace_id = p_workspace_id` inside
+// the same query that orders by embedding distance. We never fetch chunks and
+// filter in JS — one forgotten filter there is a cross-tenant leak, so it lives
+// at the lowest layer. The RLS policies on `chunks` are the second line of
+// defence.
 //
-// Steps:
-//   1. embedOne(question)  -> query vector (same model as ingestion).
-//   2. admin.rpc('match_chunks', { p_workspace_id, p_query_embedding, p_match_count }).
-//   3. Drop rows below RAG_MIN_SIMILARITY — this is what powers an honest
-//      "I don't know" when the workspace has nothing relevant.
-//   4. Return ChunkMatch[] (already ordered by similarity).
-//
-// Be ready to explain: why the RPC and not a client-side filter (a forgotten
-// filter = cross-tenant data leak, so it must live at the lowest layer), and
-// how RLS backs it up.
+//   1. embedOne(question)  -> query vector (SAME model + dim as ingestion).
+//   2. rpc('match_chunks', { p_workspace_id, p_query_embedding, p_match_count }).
+//   3. Drop rows below RAG_MIN_SIMILARITY -> powers an honest "I don't know"
+//      when the workspace has nothing relevant.
 
 import { createAdminClient } from './supabase/admin';
 import { embedOne } from './embeddings';
@@ -25,13 +21,23 @@ const MATCH_COUNT = Number(process.env.RAG_MATCH_COUNT ?? 6);
 const MIN_SIMILARITY = Number(process.env.RAG_MIN_SIMILARITY ?? 0.35);
 
 export async function retrieveChunks(
-  _workspaceId: string,
-  _question: string,
-  _matchCount: number = MATCH_COUNT,
+  workspaceId: string,
+  question: string,
+  matchCount: number = MATCH_COUNT,
 ): Promise<ChunkMatch[]> {
-  // TODO(interview): implement using match_chunks RPC + MIN_SIMILARITY gate.
-  void createAdminClient;
-  void embedOne;
-  void MIN_SIMILARITY;
-  throw new Error('retrieveChunks not implemented');
+  const queryEmbedding = await embedOne(question);
+
+  const admin = createAdminClient();
+  // supabase-js passes the number[] straight through; pgvector accepts the
+  // JSON array form "[1,2,3]" as its text input.
+  const { data, error } = await admin.rpc('match_chunks', {
+    p_workspace_id: workspaceId,
+    p_query_embedding: queryEmbedding,
+    p_match_count: matchCount,
+  });
+
+  if (error) throw new Error(`retrieval failed: ${error.message}`);
+
+  const rows = (data ?? []) as ChunkMatch[];
+  return rows.filter((r) => r.similarity >= MIN_SIMILARITY);
 }

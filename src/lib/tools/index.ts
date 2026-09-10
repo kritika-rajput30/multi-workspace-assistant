@@ -1,14 +1,11 @@
 // ============================================================================
 // TOOL REGISTRY + SAFE DISPATCH
 // ============================================================================
-// "Safe tool execution" is on the quality bar. The shape here gives you:
-//   - a fixed allow-list of tools (model can't invoke anything else);
-//   - schema validation of args BEFORE execute() runs;
-//   - graceful handling of unknown tool / bad args (returns a 'rejected'
-//     result the model can see — never throws out of the loop, never crashes).
-//
-// You still implement each tool's execute() and the getToolDeclarations() /
-// runTool() bodies during the interview — see the TODOs.
+// "Safe tool execution" is on the quality bar:
+//   - a fixed allow-list (TOOLS) — the model can't invoke anything else;
+//   - zod validation of args BEFORE execute() runs;
+//   - unknown tool / bad args -> a 'rejected' outcome the model can see;
+//   - execute() throwing -> an 'error' outcome. runTool() NEVER throws.
 
 import type { z } from 'zod';
 import { saveTask } from './save-task';
@@ -22,15 +19,15 @@ export interface ToolContext {
 export interface ToolDef<S extends z.ZodTypeAny = z.ZodTypeAny> {
   name: string;
   description: string;
-  schema: S; // zod — used to validate args before execute
+  schema: S; // zod — validates args before execute
   parameters: Record<string, unknown>; // JSON schema — what the model sees
   execute(args: z.infer<S>, ctx: ToolContext): Promise<unknown>;
 }
 
 // The allow-list. Add tools here and nowhere else.
 export const TOOLS: Record<string, ToolDef> = {
-  [saveTask.name]: saveTask as ToolDef,
-  [sendSummary.name]: sendSummary as ToolDef,
+  [saveTask.name]: saveTask as unknown as ToolDef,
+  [sendSummary.name]: sendSummary as unknown as ToolDef,
 };
 
 export interface ToolOutcome {
@@ -41,24 +38,67 @@ export interface ToolOutcome {
   error?: string;
 }
 
-// Shape the model needs: [{ functionDeclarations: [{ name, description, parameters }] }]
+// Function declarations for @google/genai: one entry per tool. `parametersJsonSchema`
+// lets us hand plain JSON Schema straight through.
 export function getToolDeclarations() {
-  // TODO(interview): map TOOLS -> functionDeclarations for @google/genai.
-  throw new Error('getToolDeclarations not implemented');
+  return [
+    {
+      functionDeclarations: Object.values(TOOLS).map((t) => ({
+        name: t.name,
+        description: t.description,
+        parametersJsonSchema: t.parameters,
+      })),
+    },
+  ];
 }
 
-// Validate + run one tool call. MUST NOT throw — always returns a ToolOutcome.
+// Validate + run one tool call. Always resolves to a ToolOutcome — never throws.
 export async function runTool(
-  _name: string,
-  _rawArgs: unknown,
-  _ctx: ToolContext,
+  name: string,
+  rawArgs: unknown,
+  ctx: ToolContext,
 ): Promise<ToolOutcome> {
-  // TODO(interview):
-  //   1. tool = TOOLS[name]; if !tool -> { status: 'rejected', error: 'unknown tool' }
-  //   2. parsed = tool.schema.safeParse(rawArgs);
-  //      if !parsed.success -> { status: 'rejected', error: <zod message> }
-  //   3. try { result = await tool.execute(parsed.data, ctx); status 'ok' }
-  //      catch (e) { status 'error', error: e.message }
-  //   4. (route handler persists this to tool_calls)
-  throw new Error('runTool not implemented');
+  const args = (rawArgs ?? {}) as Record<string, unknown>;
+  const tool = TOOLS[name];
+
+  if (!tool) {
+    return {
+      tool_name: name,
+      arguments: args,
+      result: null,
+      status: 'rejected',
+      error: `unknown tool: ${name}`,
+    };
+  }
+
+  const parsed = tool.schema.safeParse(rawArgs ?? {});
+  if (!parsed.success) {
+    return {
+      tool_name: name,
+      arguments: args,
+      result: null,
+      status: 'rejected',
+      error: `invalid arguments: ${parsed.error.issues
+        .map((i) => `${i.path.join('.')} ${i.message}`)
+        .join('; ')}`,
+    };
+  }
+
+  try {
+    const result = await tool.execute(parsed.data, ctx);
+    return {
+      tool_name: name,
+      arguments: parsed.data as Record<string, unknown>,
+      result,
+      status: 'ok',
+    };
+  } catch (err) {
+    return {
+      tool_name: name,
+      arguments: parsed.data as Record<string, unknown>,
+      result: null,
+      status: 'error',
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }

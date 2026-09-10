@@ -3,12 +3,12 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import type { ToolContext, ToolDef } from './index';
 
 // save_task — the tool with a REAL side effect recorded in the active workspace.
-// (The exercise requires at least one such tool.)
+// Writes a row to `tasks` (see supabase/schema.sql), scoped to ctx.workspaceId.
 
 const schema = z.object({
   title: z.string().min(1).max(200),
   notes: z.string().max(2000).optional(),
-  due_date: z.string().optional(), // ISO date; keep loose for v1
+  due_date: z.string().optional(), // ISO date; kept loose for v1
 });
 
 export const saveTask: ToolDef<typeof schema> = {
@@ -27,12 +27,20 @@ export const saveTask: ToolDef<typeof schema> = {
     required: ['title'],
   },
   async execute(args, ctx: ToolContext) {
-    // TODO(interview): INSERT into a `tasks` table (add it to schema.sql) with
-    // ctx.workspaceId. Return { id, title }. Never trust args before this point
-    // — runTool() has already validated them against `schema`.
-    void createAdminClient;
-    void args;
-    void ctx;
-    throw new Error('save_task.execute not implemented');
+    // args are already validated by runTool() against `schema`.
+    const admin = createAdminClient();
+    const { data, error } = await admin
+      .from('tasks')
+      .insert({
+        workspace_id: ctx.workspaceId,
+        title: args.title,
+        notes: args.notes ?? null,
+        due_date: args.due_date ?? null,
+      })
+      .select('id, title, created_at')
+      .single();
+
+    if (error) throw new Error(`could not save task: ${error.message}`);
+    return { saved: true, task: data };
   },
 };

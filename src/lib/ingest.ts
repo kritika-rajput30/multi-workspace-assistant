@@ -1,32 +1,15 @@
 // ============================================================================
-// INGESTION  —  build this during the interview.
+// INGESTION  (synchronous — no queue for this exercise)
 // ============================================================================
-// Called by POST /api/upload, synchronously (no queue for this exercise).
+// text/markdown -> utf8. application/pdf -> unpdf (getDocumentProxy + extractText),
+// a serverless-safe pdf.js build (no DOMMatrix / DOM globals needed).
 //
-// Steps:
-//   1. Extract text from the upload:
-//        - text/plain, text/markdown  -> buffer.toString('utf8')
-//        - application/pdf            -> unpdf (serverless-safe pdf.js; no DOM globals).
-//              const { getDocumentProxy, extractText } = await import('unpdf');
-//              const pdf = await getDocumentProxy(new Uint8Array(bytes));
-//              const { text } = await extractText(pdf, { mergePages: true });
-//          Dynamic-import it inside the pdf branch so the pdf.js bundle stays
-//          out of the common markdown path.
-//   2. content_hash = sha256(extracted text). This is the idempotency key.
-//   3. INSERT into documents (workspace_id, filename, content_hash).
-//        - The UNIQUE (workspace_id, content_hash) constraint makes a re-upload
-//          fail with code 23505 — catch that and return "already ingested",
-//          NOT an error. That's what "ingestion is idempotent" means.
-//   4. chunkText(text) -> RawChunk[].
-//   5. embedTexts(chunks.map(c => c.content)) -> vectors (batched).
-//   6. Bulk INSERT into chunks (workspace_id, document_id, filename,
-//      chunk_index, content, embedding).
-//   7. UPDATE documents SET n_chunks.
-//   8. If any step after (3) throws, delete the half-ingested document row so a
-//      retry starts clean (or wrap 3-7 so the doc row is only committed on
-//      success).
+// content_hash = sha256(extracted text) is the idempotency key: the UNIQUE
+// (workspace_id, content_hash) constraint turns a re-upload into a no-op
+// instead of duplicate chunks or a 500. If chunk/embed/insert fails after the
+// document row exists, we delete that row so a retry starts clean.
 //
-// Every insert here carries workspace_id explicitly (admin client bypasses RLS).
+// Every insert carries workspace_id explicitly (admin client bypasses RLS).
 
 import { createHash } from 'node:crypto';
 import { createAdminClient } from './supabase/admin';
@@ -47,11 +30,96 @@ export interface IngestResult {
   status: 'ingested' | 'already_present';
 }
 
-export async function ingestDocument(_input: IngestInput): Promise<IngestResult> {
-  // TODO(interview): implement the pipeline above.
-  void createHash;
-  void createAdminClient;
-  void chunkText;
-  void embedTexts;
-  throw new Error('ingestDocument not implemented');
+async function extractText(input: IngestInput): Promise<string> {
+  const { mimeType, bytes, filename } = input;
+  const isPdf = mimeType === 'application/pdf' || filename.toLowerCase().endsWith('.pdf');
+
+  if (isPdf) {
+    // Dynamic import: keep the pdf.js bundle out of the module graph for the
+    // common text/markdown path.
+    const { getDocumentProxy, extractText: extract } = await import('unpdf');
+    const pdf = await getDocumentProxy(new Uint8Array(bytes));
+    const { text } = await extract(pdf, { mergePages: true });
+    return text ?? '';
+  }
+  return bytes.toString('utf8');
+}
+
+export async function ingestDocument(input: IngestInput): Promise<IngestResult> {
+  const { workspaceId, filename } = input;
+  const admin = createAdminClient();
+
+  const text = (await extractText(input)).trim();
+  if (!text) throw new Error('no extractable text in upload');
+
+  const contentHash = createHash('sha256').update(text).digest('hex');
+
+  // Idempotency: if this exact content is already in this workspace, stop.
+  const { data: existing } = await admin
+    .from('documents')
+    .select('id, n_chunks')
+    .eq('workspace_id', workspaceId)
+    .eq('content_hash', contentHash)
+    .maybeSingle();
+
+  if (existing) {
+    return {
+      documentId: existing.id,
+      filename,
+      nChunks: existing.n_chunks,
+      status: 'already_present',
+    };
+  }
+
+  const { data: doc, error: docErr } = await admin
+    .from('documents')
+    .insert({ workspace_id: workspaceId, filename, content_hash: contentHash })
+    .select('id')
+    .single();
+
+  // 23505 = unique_violation: another request ingested the same file in a race.
+  if (docErr) {
+    if (docErr.code === '23505') {
+      const { data: race } = await admin
+        .from('documents')
+        .select('id, n_chunks')
+        .eq('workspace_id', workspaceId)
+        .eq('content_hash', contentHash)
+        .single();
+      return {
+        documentId: race!.id,
+        filename,
+        nChunks: race!.n_chunks,
+        status: 'already_present',
+      };
+    }
+    throw new Error(`document insert failed: ${docErr.message}`);
+  }
+
+  try {
+    const chunks = chunkText(text);
+    if (chunks.length === 0) throw new Error('chunker produced 0 chunks');
+
+    const vectors = await embedTexts(chunks.map((c) => c.content));
+
+    const rows = chunks.map((c, i) => ({
+      workspace_id: workspaceId,
+      document_id: doc.id,
+      filename,
+      chunk_index: c.index,
+      content: c.content,
+      embedding: vectors[i],
+    }));
+
+    const { error: chunkErr } = await admin.from('chunks').insert(rows);
+    if (chunkErr) throw new Error(`chunk insert failed: ${chunkErr.message}`);
+
+    await admin.from('documents').update({ n_chunks: chunks.length }).eq('id', doc.id);
+
+    return { documentId: doc.id, filename, nChunks: chunks.length, status: 'ingested' };
+  } catch (err) {
+    // Roll back the half-ingested document so a retry is clean.
+    await admin.from('documents').delete().eq('id', doc.id);
+    throw err;
+  }
 }
