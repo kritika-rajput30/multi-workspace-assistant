@@ -6,7 +6,7 @@ import { ingestDocument } from '@/lib/ingest';
 // POST /api/upload  (multipart/form-data: file, workspaceId)
 // Ingests synchronously: chunk -> embed -> store, tagged with the workspace.
 
-export const runtime = 'nodejs'; // pdf-parse + node:crypto need the Node runtime
+export const runtime = 'nodejs'; // unpdf + node:crypto need the Node runtime
 export const maxDuration = 60;
 
 const MAX_BYTES = 5 * 1024 * 1024;

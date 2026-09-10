@@ -6,8 +6,12 @@
 // Steps:
 //   1. Extract text from the upload:
 //        - text/plain, text/markdown  -> buffer.toString('utf8')
-//        - application/pdf            -> pdf-parse (v2: `import { pdf } from 'pdf-parse'`,
-//                                       then `(await pdf(buffer)).text`)
+//        - application/pdf            -> unpdf (serverless-safe pdf.js; no DOM globals).
+//              const { getDocumentProxy, extractText } = await import('unpdf');
+//              const pdf = await getDocumentProxy(new Uint8Array(bytes));
+//              const { text } = await extractText(pdf, { mergePages: true });
+//          Dynamic-import it inside the pdf branch so the pdf.js bundle stays
+//          out of the common markdown path.
 //   2. content_hash = sha256(extracted text). This is the idempotency key.
 //   3. INSERT into documents (workspace_id, filename, content_hash).
 //        - The UNIQUE (workspace_id, content_hash) constraint makes a re-upload
